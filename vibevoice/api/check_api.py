@@ -49,7 +49,7 @@ def main():
     
     # 1. Health Check
     try:
-        r = requests.get(f"{BASE_URL}/health", timeout=2)
+        r = requests.get(f"{BASE_URL}/health", timeout=5)
         if r.status_code == 200:
             print_pass("Server is reachable")
         else:
@@ -88,8 +88,8 @@ def main():
         print_fail("OpenAI Protocol Error", str(e))
 
     if not detected_voice:
-        print_fail("No voices detected to test generation.")
-        detected_voice = "en-Alice_woman.wav" # Fallback
+        print_fail("No voices detected. Defaulting to 'Alice'.")
+        detected_voice = "Alice" 
 
     # 4. Test Generation (AllTalk)
     print_header("TEST 1: ALLTALK GENERATION")
