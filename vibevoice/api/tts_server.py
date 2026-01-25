@@ -1,9 +1,6 @@
 """
-VibeVoice API Server - Hybrid Edition
-Combines: 
-1. Official VibeVoice-API Robustness (Voice mapping, Audio pre-processing)
-2. AllTalk Protocol Support (SillyTavern Native)
-3. OpenAI Protocol Support
+VibeVoice API Server - Hybrid Edition (Fixed)
+Fixes: Voice resolution with extensions, Sample Rate Pitch issues.
 """
 
 import argparse
@@ -46,8 +43,9 @@ processor = None
 voice_mapper = None
 args = None
 IS_STREAMING_MODEL = False
+SAMPLE_RATE = 22050 # Default, will be updated by model config
 
-# --- UTILS: Audio & Voice Mapping (Ported from Official API) ---
+# --- UTILS: Audio & Voice Mapping ---
 
 def load_audio_to_numpy(file_path: str) -> np.ndarray:
     """Loads audio file to float32 numpy array, taking first channel if stereo."""
@@ -63,7 +61,7 @@ def load_audio_to_numpy(file_path: str) -> np.ndarray:
 class RobustVoiceMapper:
     """
     Robust scanning of the voices directory. 
-    Maps friendly names (Alice, en-Alice_woman) to absolute file paths.
+    Maps friendly names, filenames, and partials to absolute file paths.
     """
     def __init__(self, root_dirs: List[str]):
         self.map = {}
@@ -72,7 +70,7 @@ class RobustVoiceMapper:
 
     def scan(self):
         self.map = {}
-        audio_exts = {'.wav', '.mp3', '.flac', '.ogg'}
+        audio_exts = {'.wav', '.mp3', '.flac', '.ogg', '.pt'}
         
         for d in self.root_dirs:
             if not os.path.exists(d):
@@ -81,37 +79,39 @@ class RobustVoiceMapper:
             logger.info(f"Scanning for voices in: {d}")
             for root, _, files in os.walk(d):
                 for f in files:
-                    if os.path.splitext(f)[1].lower() in audio_exts:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in audio_exts:
                         full_path = os.path.abspath(os.path.join(root, f))
-                        file_name = os.path.splitext(f)[0]
+                        file_name_no_ext = os.path.splitext(f)[0]
                         
-                        # Register exact filename
-                        self.map[file_name] = full_path
+                        # 1. Register full filename (e.g. "en-Alice_woman.wav") <- FIXES YOUR ISSUE
+                        self.map[f] = full_path
                         
-                        # Register simplified names (e.g. "Alice" from "en-Alice_woman")
-                        parts = file_name.split('-')
+                        # 2. Register filename without extension
+                        self.map[file_name_no_ext] = full_path
+                        
+                        # 3. Register simplified names (e.g. "Alice" from "en-Alice_woman")
+                        parts = file_name_no_ext.split('-')
                         if len(parts) > 1:
                             simple_name = parts[-1].split('_')[0] # Alice
                             self.map[simple_name] = full_path
-                            self.map[parts[-1]] = full_path # Alice_woman
                         else:
-                            self.map[file_name.split('_')[0]] = full_path
+                            self.map[file_name_no_ext.split('_')[0]] = full_path
 
     def get_path(self, name: str) -> Optional[str]:
         if not name: return None
-        # 1. Direct match
+        # 1. Direct match (Exact filename)
         if name in self.map: return self.map[name]
+        
         # 2. Case insensitive
         name_lower = name.lower()
         for k, v in self.map.items():
             if k.lower() == name_lower: return v
-        # 3. Partial match
-        for k, v in self.map.items():
-            if name_lower in k.lower(): return v
-        # 4. Fallback: Return first available
+            
+        # 3. Fallback: Return first available
         if self.map:
             first = list(self.map.values())[0]
-            logger.warning(f"Voice '{name}' not found, falling back to {os.path.basename(first)}")
+            logger.warning(f"Voice '{name}' not found in {len(self.map)} loaded voices. Falling back to {os.path.basename(first)}")
             return first
         return None
 
@@ -124,10 +124,6 @@ class RobustVoiceMapper:
 # --- Inference Logic ---
 
 def run_inference(text: str, speaker_name: str, speed: float = 1.0):
-    """
-    Main inference driver.
-    Fixes the 'tuple index out of range' error by loading audio to numpy first.
-    """
     voice_path = voice_mapper.get_path(speaker_name)
     if not voice_path:
         raise ValueError(f"No voices found. Ensure the 'demo/voices' folder exists.")
@@ -137,12 +133,10 @@ def run_inference(text: str, speaker_name: str, speed: float = 1.0):
     formatted_text = f"Speaker 0: {text}"
     target_device = args.device
     
-    # 1. Load Audio Data (Crucial Fix: Processor needs Array, not String path)
+    # 1. Load Audio Data
     if IS_STREAMING_MODEL and voice_path.endswith('.pt'):
-        # Special case for .pt latents in streaming model
         voice_input = torch.load(voice_path, map_location=target_device, weights_only=False)
     else:
-        # Standard workflow: Load WAV to Numpy
         voice_input = load_audio_to_numpy(voice_path)
 
     start_t = time.time()
@@ -150,14 +144,12 @@ def run_inference(text: str, speaker_name: str, speed: float = 1.0):
     # 2. Process Inputs
     if IS_STREAMING_MODEL:
         if isinstance(voice_input, torch.Tensor) or isinstance(voice_input, dict):
-             # Cached prompt (.pt file)
             inputs = processor.process_input_with_cached_prompt(
                 text=formatted_text, cached_prompt=voice_input, padding=True,
                 return_tensors="pt", return_attention_mask=True
             )
             prefilled = copy.deepcopy(voice_input)
         else:
-            # Raw Audio
             inputs = processor(
                 text=[formatted_text], voice_samples=[[voice_input]],
                 padding=True, return_tensors="pt", return_attention_mask=True
@@ -165,14 +157,11 @@ def run_inference(text: str, speaker_name: str, speed: float = 1.0):
             prefilled = None
     else:
         # Standard Model
-        # NOTE: voice_samples expects a list of samples per batch item. 
-        # Since batch size is 1, we pass [[numpy_array]].
         inputs = processor(
             text=[formatted_text], voice_samples=[[voice_input]],
             padding=True, return_tensors="pt", return_attention_mask=True
         )
 
-    # Move inputs to device
     for k, v in inputs.items():
         if torch.is_tensor(v): inputs[k] = v.to(target_device)
 
@@ -203,7 +192,7 @@ def run_inference(text: str, speaker_name: str, speed: float = 1.0):
             
         if len(audio_data.shape) > 1: audio_data = audio_data.squeeze()
         
-        # Apply normalization to prevent clipping
+        # Normalize
         max_val = np.abs(audio_data).max()
         if max_val > 1.0: audio_data = audio_data / max_val
         
@@ -235,7 +224,8 @@ async def openai_speech(req: OpenAIRequest):
         if audio_data is None: raise HTTPException(500, "No audio generated")
         
         buffer = io.BytesIO()
-        sf.write(buffer, audio_data, 24000, format='wav')
+        # Use Dynamic SAMPLE_RATE
+        sf.write(buffer, audio_data, SAMPLE_RATE, format='wav')
         buffer.seek(0)
         return Response(content=buffer.read(), media_type="audio/wav")
     except Exception as e:
@@ -267,7 +257,6 @@ def get_rvc_voices(): return {"rvcvoices": []}
 
 @app.post("/api/previewvoice/")
 async def preview_voice(voice: str = Form(...)):
-    # Legacy endpoint mapping
     return await alltalk_speech(
         text_input="This is a preview of the selected voice.",
         character_voice_gen=voice
@@ -282,6 +271,7 @@ async def alltalk_speech(
     output_file_name: str = Form(None),
 ):
     try:
+        # Handle cases where client sends "file.wav" but we just want "file" (though mapping handles both now)
         audio_data = run_inference(text_input, character_voice_gen)
         if audio_data is None: 
              return JSONResponse({"status": "error", "error": "Model returned no audio"}, 500)
@@ -291,8 +281,8 @@ async def alltalk_speech(
         filename = f"{int(time.time())}.wav"
         filepath = os.path.join(output_dir, filename)
         
-        # Save to disk
-        sf.write(filepath, audio_data, 24000)
+        # Save to disk using Dynamic SAMPLE_RATE
+        sf.write(filepath, audio_data, SAMPLE_RATE)
         
         file_url = f"/outputs/{filename}"
         return JSONResponse({
@@ -336,14 +326,12 @@ if __name__ == "__main__":
     voice_dirs = [
         os.path.join(root, "demo", "voices"),
         os.path.join(root, "voices"),
-        # Add relative path just in case we are deep in subfolders
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "demo", "voices"))
     ]
 
     if "streaming" in args.model_path.lower() or "0.5b" in args.model_path.lower():
         IS_STREAMING_MODEL = True
         logger.info("Mode: Streaming (Experimental)")
-        # Prioritize streaming model latents
         voice_dirs.insert(0, os.path.join(root, "demo", "voices", "streaming_model"))
         processor = VibeVoiceStreamingProcessor.from_pretrained(args.model_path)
         ModelClass = VibeVoiceStreamingForConditionalGenerationInference
@@ -368,6 +356,19 @@ if __name__ == "__main__":
     if device == "mps": model.to("mps")
     model.eval()
     model.set_ddpm_inference_steps(num_steps=args.steps)
+    
+    # --- FIX: DETECT SAMPLE RATE ---
+    try:
+        if hasattr(model.config, 'sample_rate'):
+            SAMPLE_RATE = model.config.sample_rate
+        elif hasattr(model.config, 'audio_encoder_config'):
+             SAMPLE_RATE = model.config.audio_encoder_config.get('sampling_rate', 22050)
+        else:
+            SAMPLE_RATE = 22050
+    except:
+        SAMPLE_RATE = 22050
+        
+    logger.info(f"Model Sample Rate Detected: {SAMPLE_RATE} Hz")
     
     print(">>> VibeVoice API Ready (Universal Mode) <<<")
     uvicorn.run(app, host=args.host, port=args.port)
