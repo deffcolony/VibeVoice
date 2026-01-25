@@ -142,7 +142,7 @@ if "!vibevoice_streaming_trigger!"=="true" (
 
 set "api_command=pixi run python tts_server.py --port !vibevoice_api_port! --model_path !MODEL_ARG!"
 echo %blue_bg%[%time%]%reset% %blue_fg_strong%[INFO]%reset% Launching API Server on Port !vibevoice_api_port!...
-start cmd /k "title VibeVoice API && cd /d %install_path% && !api_command!"
+start cmd /k "title VibeVoice API && cd /d %install_path%\vibevoice\api && !api_command!"
 goto :home
 
 REM ==========================================
