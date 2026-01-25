@@ -442,7 +442,7 @@ echo %cyan_fg_strong%This will run the check_api.py script to test the server co
 echo %cyan_fg_strong%Ensure the API Server (Option 2) is running in another window!%reset%
 echo.
 pause
-cd /d "%install_path%"
+cd /d "%install_path%\vibevoice\api"
 call pixi run python check_api.py
 pause
 goto :home
